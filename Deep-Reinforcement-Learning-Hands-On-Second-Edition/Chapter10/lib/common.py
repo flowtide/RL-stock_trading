@@ -1,17 +1,13 @@
 import numpy as np
-
 import torch
 import torch.nn as nn
-
 import warnings
 from typing import Iterable
 from datetime import datetime, timedelta
 
-import ptan
-import ptan.ignite as ptan_ignite
-from ignite.engine import Engine
+from ignite.engine import Engine, Events
 from ignite.metrics import RunningAverage
-from ignite.contrib.handlers import tensorboard_logger as tb_logger
+from ignite.contrib.handlers.tensorboard_logger import TensorboardLogger, global_step_from_engine
 
 
 @torch.no_grad()
@@ -28,17 +24,18 @@ def calc_values_of_states(states, net, device="cpu"):
 def unpack_batch(batch):
     states, actions, rewards, dones, last_states = [], [], [], [], []
     for exp in batch:
-        state = np.array(exp.state, copy=False)
+        state = np.asarray(exp.state)  # Removed copy=False
         states.append(state)
         actions.append(exp.action)
         rewards.append(exp.reward)
         dones.append(exp.last_state is None)
         if exp.last_state is None:
-            last_states.append(state)       # the result will be masked anyway
+            last_states.append(state)  # The result will be masked anyway
         else:
-            last_states.append(np.array(exp.last_state, copy=False))
-    return np.array(states, copy=False), np.array(actions), np.array(rewards, dtype=np.float32), \
-           np.array(dones, dtype=np.uint8), np.array(last_states, copy=False)
+            last_states.append(np.asarray(exp.last_state))  # Removed copy=False
+
+    return np.asarray(states), np.asarray(actions), np.asarray(rewards, dtype=np.float32), \
+           np.asarray(dones, dtype=np.uint8), np.asarray(last_states)
 
 
 def calc_loss(batch, net, tgt_net, gamma, device="cpu"):
@@ -59,51 +56,40 @@ def calc_loss(batch, net, tgt_net, gamma, device="cpu"):
     return nn.MSELoss()(state_action_values, expected_state_action_values)
 
 
-def batch_generator(buffer: ptan.experience.ExperienceReplayBuffer,
-                    initial: int, batch_size: int):
+def batch_generator(buffer, initial, batch_size):
     buffer.populate(initial)
     while True:
         buffer.populate(1)
         yield buffer.sample(batch_size)
 
-
-def setup_ignite(engine: Engine, exp_source, run_name: str,
-                 extra_metrics: Iterable[str] = ()):
-    # get rid of missing metrics warning
+def setup_ignite(engine: Engine, exp_source, run_name: str, extra_metrics: Iterable[str] = ()):
     warnings.simplefilter("ignore", category=UserWarning)
 
-    handler = ptan_ignite.EndOfEpisodeHandler(exp_source, subsample_end_of_episode=100)
-    handler.attach(engine)
-    ptan_ignite.EpisodeFPSHandler().attach(engine)
-
-    @engine.on(ptan_ignite.EpisodeEvents.EPISODE_COMPLETED)
-    def episode_completed(trainer: Engine):
-        passed = trainer.state.metrics.get('time_passed', 0)
-        print("Episode %d: reward=%.0f, steps=%s, "
-              "speed=%.1f f/s, elapsed=%s" % (
-            trainer.state.episode, trainer.state.episode_reward,
-            trainer.state.episode_steps,
-            trainer.state.metrics.get('avg_fps', 0),
-            timedelta(seconds=int(passed))))
-
+    # Initialize Tensorboard logging
     now = datetime.now().isoformat(timespec='minutes')
     logdir = f"runs/{now}-{run_name}"
-    tb = tb_logger.TensorboardLogger(log_dir=logdir)
-    run_avg = RunningAverage(output_transform=lambda v: v['loss'])
-    run_avg.attach(engine, "avg_loss")
+    tb_logger = TensorboardLogger(log_dir=logdir)
 
-    metrics = ['reward', 'steps', 'avg_reward']
-    handler = tb_logger.OutputHandler(
-        tag="episodes", metric_names=metrics)
-    event = ptan_ignite.EpisodeEvents.EPISODE_COMPLETED
-    tb.attach(engine, log_handler=handler, event_name=event)
+    # Attach RunningAverage of loss to engine
+    RunningAverage(output_transform=lambda v: v['loss']).attach(engine, "avg_loss")
 
-    ptan_ignite.PeriodicEvents().attach(engine)
-    metrics = ['avg_loss', 'avg_fps']
-    metrics.extend(extra_metrics)
-    handler = tb_logger.OutputHandler(
-        tag="train", metric_names=metrics,
-        output_transform=lambda a: a)
-    event = ptan_ignite.PeriodEvents.ITERS_1000_COMPLETED
-    tb.attach(engine, log_handler=handler, event_name=event)
-    return tb
+    # Log every iteration to TensorBoard
+    tb_logger.attach_output_handler(
+        engine,
+        event_name=Events.ITERATION_COMPLETED(every=1000),
+        tag="train",
+        metric_names=["avg_loss", "avg_fps"] + list(extra_metrics),
+        global_step_transform=global_step_from_engine(engine)
+    )
+
+    # Attach custom handler for end of episodes
+    @engine.on(Events.ITERATION_COMPLETED)
+    def log_episode_metrics(trainer: Engine):
+        if getattr(trainer.state, "episode_done", False):
+            passed = trainer.state.metrics.get("time_passed", 0)
+            print(f"Episode {trainer.state.episode}: reward={trainer.state.episode_reward:.0f}, "
+                  f"steps={trainer.state.episode_steps}, "
+                  f"speed={trainer.state.metrics.get('avg_fps', 0):.1f} f/s, "
+                  f"elapsed={timedelta(seconds=int(passed))}")
+
+    return tb_logger

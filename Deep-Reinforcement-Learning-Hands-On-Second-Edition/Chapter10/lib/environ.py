@@ -147,7 +147,7 @@ class State1D(State):
 
 class StocksEnv(gym.Env):
     metadata = {'render.modes': ['human']}
-    spec = EnvSpec("StocksEnv-v0")
+    #spec = EnvSpec("StocksEnv-v0")
 
     def __init__(self, prices, bars_count=DEFAULT_BARS_COUNT,
                  commission=DEFAULT_COMMISSION_PERC,
@@ -193,7 +193,8 @@ class StocksEnv(gym.Env):
             "instrument": self._instrument,
             "offset": self._state._offset
         }
-        return obs, reward, done, info
+        truncated = False  # or use a condition if you have specific truncation logic
+        return obs, reward, done, truncated, info
 
     def render(self, mode='human', close=False):
         pass
@@ -203,7 +204,8 @@ class StocksEnv(gym.Env):
 
     def seed(self, seed=None):
         self.np_random, seed1 = seeding.np_random(seed)
-        seed2 = seeding.hash_seed(seed1 + 1) % 2 ** 31
+        # seed2 = seeding.hash_seed(seed1 + 1) % 2 ** 31
+        seed2 = hash(seed1 + 1) % 2 ** 31
         return [seed1, seed2]
 
     @classmethod
