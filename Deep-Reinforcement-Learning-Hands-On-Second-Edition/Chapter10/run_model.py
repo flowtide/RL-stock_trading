@@ -50,7 +50,7 @@ if __name__ == "__main__":
             action_idx = env.action_space.sample()
         action = environ.Actions(action_idx)
 
-        obs, reward, done, _ = env.step(action_idx)
+        obs, reward, done, _, _ = env.step(action_idx)
         total_reward += reward
         rewards.append(total_reward)
         if step_idx % 100 == 0:

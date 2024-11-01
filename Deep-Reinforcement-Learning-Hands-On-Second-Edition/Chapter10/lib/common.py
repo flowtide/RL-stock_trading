@@ -86,10 +86,11 @@ def setup_ignite(engine: Engine, exp_source, run_name: str, extra_metrics: Itera
     @engine.on(Events.ITERATION_COMPLETED)
     def log_episode_metrics(trainer: Engine):
         if getattr(trainer.state, "episode_done", False):
-            passed = trainer.state.metrics.get("time_passed", 0)
-            print(f"Episode {trainer.state.episode}: reward={trainer.state.episode_reward:.0f}, "
-                  f"steps={trainer.state.episode_steps}, "
-                  f"speed={trainer.state.metrics.get('avg_fps', 0):.1f} f/s, "
-                  f"elapsed={timedelta(seconds=int(passed))}")
+            if trainer.state.episode % 100 == 0:
+                passed = trainer.state.metrics.get("time_passed", 0)
+                print(f"Episode {trainer.state.episode}: reward={trainer.state.episode_reward:.0f}, "
+                    f"steps={trainer.state.episode_steps}, "
+                    f"speed={trainer.state.metrics.get('avg_fps', 0):.1f} f/s, "
+                    f"elapsed={timedelta(seconds=int(passed))}")
 
     return tb_logger

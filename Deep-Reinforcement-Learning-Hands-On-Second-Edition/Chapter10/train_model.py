@@ -24,20 +24,17 @@ SAVES_DIR = pathlib.Path("saves")
 STOCKS = "data/YNDX_160101_161231.csv"
 VAL_STOCKS = "data/YNDX_150101_151231.csv"
 
-BATCH_SIZE = 32
-BARS_COUNT = 10
-
 EPS_START = 1.0
 EPS_FINAL = 0.1
-EPS_STEPS = 1000000
+EPS_STEPS = 1_000_000
 
 GAMMA = 0.99
 
-REPLAY_SIZE = 100000
-REPLAY_INITIAL = 10000
+REPLAY_SIZE = 100_000
+REPLAY_INITIAL = 10_000
 REWARD_STEPS = 2
 LEARNING_RATE = 0.0001
-STATES_TO_EVALUATE = 1000
+STATES_TO_EVALUATE = 1_000
 
 class EpsilonTracker:
     def __init__(self, epsilon_greedy_selector, epsilon_start, epsilon_final, epsilon_frames):
@@ -57,9 +54,16 @@ if __name__ == "__main__":
     parser.add_argument("--data", default=STOCKS, help=f"Stocks file or dir, default={STOCKS}")
     parser.add_argument("--year", type=int, help="Year to train on, overrides --data")
     parser.add_argument("--val", default=VAL_STOCKS, help="Validation data, default=" + VAL_STOCKS)
+    parser.add_argument("--batch-size", type=int, default=32 * 8, help="Batch size for training")
+    parser.add_argument("--max-iterations", type=int, default=5_000_000, help="Maximum training iterations")
+    parser.add_argument("--bars-count", type=int, default=10, help="Number of bars to include in the state")
     parser.add_argument("-r", "--run", required=True, help="Run name")
     args = parser.parse_args()
     device = torch.device("cuda" if args.cuda else "cpu")
+
+    BATCH_SIZE = args.batch_size  # Use the batch size from command-line arguments
+    MAX_ITERATIONS = args.max_iterations  # Use the max iterations from command-line arguments
+    BARS_COUNT = args.bars_count  # Use the bars count from command-line arguments
 
     saves_path = SAVES_DIR / f"simple-{args.run}"
     saves_path.mkdir(parents=True, exist_ok=True)
@@ -84,13 +88,17 @@ if __name__ == "__main__":
     val_data = {"YNDX": data.load_relative(val_path)}
     env_val = environ.StocksEnv(val_data, bars_count=BARS_COUNT)
 
+    print(env.observation_space.shape[0], env.action_space.n)
+    import sys
+    sys.exit()
     net = models.SimpleFFDQN(env.observation_space.shape[0], env.action_space.n).to(device)
     tgt_net = ptan.agent.TargetNet(net)
 
     selector = ptan.actions.EpsilonGreedyActionSelector(EPS_START)
     eps_tracker = EpsilonTracker(selector, EPS_START, EPS_FINAL, EPS_STEPS)
     agent = ptan.agent.DQNAgent(net, selector, device=device)
-    exp_source = ptan.experience.ExperienceSourceFirstLast(env, agent, GAMMA, steps_count=REWARD_STEPS)
+    exp_source = ptan.experience.ExperienceSourceFirstLast(
+        env, agent, GAMMA, steps_count=REWARD_STEPS)
     buffer = ptan.experience.ExperienceReplayBuffer(exp_source, REPLAY_SIZE)
     optimizer = optim.Adam(net.parameters(), lr=LEARNING_RATE)
 
@@ -103,8 +111,8 @@ if __name__ == "__main__":
 
         if getattr(engine.state, "eval_states", None) is None:
             eval_states = buffer.sample(STATES_TO_EVALUATE)
-            eval_states = [np.asarray(transition.state) for transition in eval_states]  # Changed to np.asarray
-            engine.state.eval_states = np.asarray(eval_states)  # Changed to np.asarray
+            eval_states = [np.asarray(transition.state) for transition in eval_states]
+            engine.state.eval_states = np.asarray(eval_states)
 
         return {
             "loss": loss_v.item(),
@@ -112,22 +120,47 @@ if __name__ == "__main__":
         }
 
     engine = Engine(process_batch)
-    tb = common.setup_ignite(engine, exp_source, f"simple-{args.run}", extra_metrics=('values_mean',))
+    tb = common.setup_ignite(
+        engine, exp_source, f"simple-{args.run}", extra_metrics=('values_mean',))
 
     # Sync target network and log evaluation metrics every 1000 iterations
     @engine.on(Events.ITERATION_COMPLETED(every=1000))
     def sync_eval(engine: Engine):
         tgt_net.sync()
-        mean_val = common.calc_values_of_states(engine.state.eval_states, net, device=device)
+        mean_val = common.calc_values_of_states(
+            engine.state.eval_states, net, device=device)
         engine.state.metrics["values_mean"] = mean_val
         if getattr(engine.state, "best_mean_val", None) is None:
             engine.state.best_mean_val = mean_val
         if engine.state.best_mean_val < mean_val:
-            print(f"{engine.state.iteration}: Best mean value updated {engine.state.best_mean_val:.3f} -> {mean_val:.3f}")
+            print(f"{engine.state.iteration}: Best mean value updated "
+                  f"{engine.state.best_mean_val:.3f} -> {mean_val:.3f}")
             path = saves_path / f"mean_value-{mean_val:.3f}.data"
             torch.save(net.state_dict(), path)
             engine.state.best_mean_val = mean_val
 
+    # Add a termination condition
+    @engine.on(Events.ITERATION_COMPLETED)
+    def check_termination_condition(engine: Engine):
+        if engine.state.iteration >= MAX_ITERATIONS:
+            print(f"Reached maximum iterations: {MAX_ITERATIONS}. Stopping training.")
+            engine.terminate()
+
+    # Event handler to track episodes
+    @engine.on(Events.ITERATION_COMPLETED)
+    def track_episodes(engine: Engine):
+        rewards_steps = exp_source.pop_rewards_steps()
+        if rewards_steps:
+            for reward, steps in rewards_steps:
+                engine.state.episode_done = True
+                engine.state.episode_reward = reward
+                engine.state.episode_steps = steps
+                if not hasattr(engine.state, 'episode'):
+                    engine.state.episode = 0
+                engine.state.episode += 1
+        else:
+            engine.state.episode_done = False
+        
     # Validation handler to evaluate performance every 10,000 iterations
     @engine.on(Events.ITERATION_COMPLETED(every=10000))
     def validate(engine: Engine):
@@ -143,7 +176,8 @@ if __name__ == "__main__":
         if getattr(engine.state, "best_val_reward", None) is None:
             engine.state.best_val_reward = val_reward
         if engine.state.best_val_reward < val_reward:
-            print(f"Best validation reward updated: {engine.state.best_val_reward:.3f} -> {val_reward:.3f}, model saved")
+            print(f"Best validation reward updated: {engine.state.best_val_reward:.3f} "
+                  f"-> {val_reward:.3f}, model saved")
             engine.state.best_val_reward = val_reward
             path = saves_path / f"val_reward-{val_reward:.3f}.data"
             torch.save(net.state_dict(), path)
