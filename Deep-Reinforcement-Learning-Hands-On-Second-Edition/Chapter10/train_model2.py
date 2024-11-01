@@ -21,8 +21,6 @@ register(
 )
 
 SAVES_DIR = pathlib.Path("saves")
-STOCKS = "data/YNDX_160101_161231.csv"
-VAL_STOCKS = "data/YNDX_150101_151231.csv"
 
 EPS_START = 1.0
 EPS_FINAL = 0.1
@@ -50,44 +48,50 @@ class EpsilonTracker:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda", help="Enable cuda", default=False, action="store_true")
-    parser.add_argument("--data", default=STOCKS, help=f"Stocks file or dir, default={STOCKS}")
-    parser.add_argument("--year", type=int, help="Year to train on, overrides --data")
-    parser.add_argument("--val", default=VAL_STOCKS, help="Validation data, default=" + VAL_STOCKS)
-    parser.add_argument("--batch-size", type=int, default=32 * 8, help="Batch size for training")
+    parser.add_argument("--nocuda", help="Disable cuda", default=True, action="store_false")
+    parser.add_argument("-d", "--data", required=True, help="Stocks file or directory for training data")
+    parser.add_argument("-v", "--val", required=True, help="Validation data file or directory")
+    parser.add_argument("--batch-size", type=int, default=128, help="Batch size for training")
     parser.add_argument("--max-iterations", type=int, default=5_000_000, help="Maximum training iterations")
-    parser.add_argument("--bars-count", type=int, default=10, help="Number of bars to include in the state")
+    parser.add_argument("--bars-count", type=int, default=50, help="Number of bars to include in the state")
     parser.add_argument("-r", "--run", required=True, help="Run name")
+    parser.add_argument("-m", "--model", choices=["DQNConv1D", "SimpleFFDQN"], required=True,
+                        help="Choose model architecture: DQNConv1D or SimpleFFDQN")
     args = parser.parse_args()
-    device = torch.device("cuda" if args.cuda else "cpu")
+    device = torch.device("cpu" if args.nocuda else "gpu")
 
     BATCH_SIZE = args.batch_size  # Use the batch size from command-line arguments
     MAX_ITERATIONS = args.max_iterations  # Use the max iterations from command-line arguments
     BARS_COUNT = args.bars_count  # Use the bars count from command-line arguments
+    state_1d = (args.model == "DQNConv1D")  # Determine the state_1d mode based on model choice
 
-    saves_path = SAVES_DIR / f"simple-{args.run}"
+    saves_path = SAVES_DIR / f"{args.model}-{args.run}"
     saves_path.mkdir(parents=True, exist_ok=True)
 
     data_path = pathlib.Path(args.data)
     val_path = pathlib.Path(args.val)
 
-    if args.year is not None or data_path.is_file():
-        if args.year is not None:
-            stock_data = data.load_year_data(args.year)
-        else:
-            stock_data = {"YNDX": data.load_relative(data_path)}
-        env = environ.StocksEnv(stock_data, bars_count=BARS_COUNT)
-        env_tst = environ.StocksEnv(stock_data, bars_count=BARS_COUNT)
+    # Load data directly from file or directory specified in `--data`
+    if data_path.is_file():
+        stock_data = {"YNDX": data.load_relative(data_path)}
+        env = environ.StocksEnv(stock_data, bars_count=BARS_COUNT, state_1d=state_1d)
+        env_tst = environ.StocksEnv(stock_data, bars_count=BARS_COUNT, state_1d=state_1d)
     elif data_path.is_dir():
-        env = environ.StocksEnv.from_dir(data_path, bars_count=BARS_COUNT)
-        env_tst = environ.StocksEnv.from_dir(data_path, bars_count=BARS_COUNT)
+        env = environ.StocksEnv.from_dir(data_path, bars_count=BARS_COUNT, state_1d=state_1d)
+        env_tst = environ.StocksEnv.from_dir(data_path, bars_count=BARS_COUNT, state_1d=state_1d)
     else:
         raise RuntimeError("No data to train on")
 
     env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
     val_data = {"YNDX": data.load_relative(val_path)}
-    env_val = environ.StocksEnv(val_data, bars_count=BARS_COUNT)
-    net = models.SimpleFFDQN(env.observation_space.shape[0], env.action_space.n).to(device)
+    env_val = environ.StocksEnv(val_data, bars_count=BARS_COUNT, state_1d=state_1d)
+
+    # Choose model architecture based on the --model argument
+    if args.model == "DQNConv1D":
+        net = models.DQNConv1D(env.observation_space.shape, env.action_space.n).to(device)
+    else:
+        net = models.SimpleFFDQN(env.observation_space.shape[0], env.action_space.n).to(device)
+
     tgt_net = ptan.agent.TargetNet(net)
 
     selector = ptan.actions.EpsilonGreedyActionSelector(EPS_START)
@@ -117,7 +121,7 @@ if __name__ == "__main__":
 
     engine = Engine(process_batch)
     tb = common.setup_ignite(
-        engine, exp_source, f"simple-{args.run}", extra_metrics=('values_mean',))
+        engine, exp_source, f"{args.model}-{args.run}", extra_metrics=('values_mean',))
 
     # Sync target network and log evaluation metrics every 1000 iterations
     @engine.on(Events.ITERATION_COMPLETED(every=1000))
