@@ -66,8 +66,8 @@ def prices_to_relative(prices):
     return Prices(open=prices.open, high=rh, low=rl, close=rc, volume=prices.volume)
 
 
-def load_relative(csv_file):
-    return prices_to_relative(read_csv(csv_file))
+def load_relative(csv_file, filter_data=True):
+    return prices_to_relative(read_csv(csv_file, filter_data=filter_data))
 
 
 def price_files(dir_name):
